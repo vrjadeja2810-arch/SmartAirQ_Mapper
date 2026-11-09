@@ -6,6 +6,7 @@ export class AirQualityMap {
   constructor(containerId = "map") {
     this.containerId = containerId;
     this.map = null;
+    this.baseTileLayer = null;
     this.aoeCircle = null;
     this.centerMarker = null;
     this.currentCoords = { lat: 20.5937, lng: 78.9629 }; // Default fallback (India central)
@@ -29,11 +30,33 @@ export class AirQualityMap {
     // Zoom control at bottom right
     L.control.zoom({ position: "bottomright" }).addTo(this.map);
 
-    // Modern CartoDB Positron Dark & Light compatible tiles
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+    // Initial default Carto tile layer
+    this.setCartoConfig({ cartoMapStyle: "voyager" });
+  }
+
+  /**
+   * Configure Carto Basemap with optional private API key and style preset
+   */
+  setCartoConfig(config = {}) {
+    if (!this.map) return;
+    const key = config.cartoApiKey ? config.cartoApiKey.trim() : "";
+    const style = config.cartoMapStyle || "voyager";
+
+    let tileUrl = `https://{s}.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}{r}.png`;
+    if (key) {
+      tileUrl += `?api_key=${encodeURIComponent(key)}`;
+    }
+
+    const options = {
       maxZoom: 19,
+      subdomains: "abcd",
       attribution: '&copy; <a href="https://carto.com/">CARTO</a>, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-    }).addTo(this.map);
+    };
+
+    if (this.baseTileLayer) {
+      this.map.removeLayer(this.baseTileLayer);
+    }
+    this.baseTileLayer = L.tileLayer(tileUrl, options).addTo(this.map);
   }
 
   /**

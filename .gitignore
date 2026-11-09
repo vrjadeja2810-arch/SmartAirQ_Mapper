@@ -9,10 +9,16 @@ venv/
 ENV/
 .venv/
 
-# Environment variables & secrets
+# Environment variables & secrets (NEVER COMMIT)
 .env
-.env.local
+.env.*
 *.env
+!.env.example
+config.local.json
+config.js
+secrets.*
+*.key
+*.pem
 
 # SQLite Databases (uncomment if you want the database excluded from git)
 # air_quality.db

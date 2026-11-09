@@ -4,6 +4,10 @@ import csv
 import io
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load local environment variables from .env if present
+load_dotenv()
 
 # Initialize Flask with static folder configured
 app = Flask(__name__, static_folder='static', static_url_path='/static')
@@ -142,6 +146,18 @@ def export_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+# 5. Client configuration endpoint for Carto API & Basemap settings (HTTP GET)
+@app.route('/api/config', methods=['GET'])
+def get_client_config():
+    carto_key = os.environ.get('CARTO_API_KEY', '').strip()
+    map_style = os.environ.get('CARTO_MAP_STYLE', 'voyager').strip()
+    return jsonify({
+        "status": "success",
+        "hasCartoKey": bool(carto_key),
+        "cartoApiKey": carto_key,
+        "cartoMapStyle": map_style
+    })
 
 if __name__ == '__main__':
     init_db()

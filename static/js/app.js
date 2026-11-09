@@ -53,10 +53,27 @@ class SmartAirQApp {
     this.chartManager = new TrendsChart("trendsChart");
     this.bindEvents();
 
+    // Fetch server client config (Carto API Key, basemap style)
+    await this.fetchConfig();
+
     // Initial fetch and start loop
     await this.fetchTelemetry();
     this.startPolling();
     this.startClockTicker();
+  }
+
+  async fetchConfig() {
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/api/config`, { cache: "no-store" });
+      if (res.ok) {
+        const config = await res.json();
+        if (config.cartoApiKey || config.cartoMapStyle) {
+          this.mapManager.setCartoConfig(config);
+        }
+      }
+    } catch (e) {
+      console.info("Using default open Carto basemap tiles");
+    }
   }
 
   bindEvents() {
