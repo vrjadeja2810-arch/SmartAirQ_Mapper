@@ -1,0 +1,91 @@
+/* ==========================================================================
+   Design Tokens (WebJs Style Token System)
+   Supports Light & Dark Modes with semantic color mappings
+   ========================================================================== */
+
+:root {
+  /* Color Palette - Dark Mode (Default) */
+  --bg-primary: #0a0e17;
+  --bg-surface: #111827;
+  --bg-surface-elevated: #1f2937;
+  --bg-surface-subtle: #162032;
+  --bg-surface-glass: rgba(17, 24, 39, 0.75);
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-medium: rgba(255, 255, 255, 0.16);
+  --border-strong: rgba(255, 255, 255, 0.28);
+
+  --text-primary: #f9fafb;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --text-inverse: #111827;
+
+  --accent-primary: #38bdf8;
+  --accent-hover: #0ea5e9;
+  --accent-glow: rgba(56, 189, 248, 0.25);
+
+  /* Semantic Environmental Scoring Colors (1-10 Score) */
+  --score-10: #10b981;        /* Excellent (AQI 0-25) */
+  --score-8-9: #22c55e;       /* Good (AQI 26-50) */
+  --score-5-7: #eab308;       /* Moderate (AQI 51-100) */
+  --score-3-4: #f97316;       /* Unhealthy (AQI 101-150) */
+  --score-1-2: #ef4444;       /* Hazardous (AQI 151+) */
+
+  /* Status Colors */
+  --status-online: #10b981;
+  --status-offline: #ef4444;
+  --status-connecting: #f59e0b;
+  --status-pulse-glow: rgba(16, 185, 129, 0.4);
+
+  /* Metric Accent Colors */
+  --metric-pm25: #38bdf8;
+  --metric-pm10: #818cf8;
+  --metric-temp: #f97316;
+  --metric-humidity: #06b6d4;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 20px var(--accent-glow);
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+  --transition-smooth: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme="light"] {
+  --bg-primary: #f3f4f6;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f9fafb;
+  --bg-surface-subtle: #f0fdf4;
+  --bg-surface-glass: rgba(255, 255, 255, 0.85);
+
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-medium: rgba(0, 0, 0, 0.15);
+  --border-strong: rgba(0, 0, 0, 0.25);
+
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #9ca3af;
+  --text-inverse: #ffffff;
+
+  --accent-primary: #0284c7;
+  --accent-hover: #0369a1;
+  --accent-glow: rgba(2, 132, 199, 0.2);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.08);
+}

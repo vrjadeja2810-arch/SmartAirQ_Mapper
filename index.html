@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Air Quality Monitor & Telemetry Mapper</title>
+  
+  <!-- Favicon / SVG -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2338bdf8'><path d='M12 3a9 9 0 0 0-9 9 9 9 0 0 0 9 9 9 9 0 0 0 9-9 9 9 0 0 0-9-9zm0 16a7 7 0 1 1 7-7 7 7 0 0 1-7 7z'/></svg>">
+
+  <!-- Leaflet CSS for Map Rendering -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+
+  <!-- Design Tokens & Main Styles -->
+  <link rel="stylesheet" href="static/css/tokens.css">
+  <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- ======================================================================
+         2.1 The Header (Top Bar)
+         ====================================================================== -->
+    <header class="app-header">
+      <!-- Left: Logo & Brand -->
+      <div class="brand-section">
+        <div class="brand-icon-wrapper" title="Smart Air Quality Mapper">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 18h8a4 4 0 0 0 0-8 6 6 0 0 0-11-2 4 4 0 0 0 1 8"/>
+            <path d="M19 12a3 3 0 0 1 0 6H17"/>
+          </svg>
+        </div>
+        <div class="brand-titles">
+          <h1>Smart AirQ Mapper</h1>
+          <span class="brand-subtitle">Environmental Telemetry & Spatial AoE Heatmap</span>
+        </div>
+      </div>
+
+      <!-- Center: Global Environmental Score (1-10) -->
+      <div class="header-score-center">
+        <div class="score-badge" title="Overall Environmental Quality Score (1-10)">
+          <div class="score-circle" id="globalScoreCircle">--</div>
+          <div class="score-meta">
+            <span class="score-label">Environmental Score</span>
+            <span class="score-status" id="globalScoreStatus">Evaluating...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: System Status, CSV Download, Theme Toggle -->
+      <div class="header-actions">
+        <!-- Glowing Server Status Indicator -->
+        <div class="status-indicator-badge" title="Flask Backend Connectivity Status">
+          <span class="status-dot connecting" id="statusDot"></span>
+          <span id="statusText">Connecting...</span>
+          <span style="opacity: 0.5">•</span>
+          <span id="lastPacketText">Waiting...</span>
+        </div>
+
+        <!-- Export CSV Button -->
+        <a id="btnExport" href="/api/export-csv" class="btn-export" title="Download all historical readings as CSV">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span>Download CSV</span>
+        </a>
+
+        <!-- Dark/Light Theme Toggle -->
+        <button id="themeToggle" class="btn-theme" title="Toggle Light / Dark Mode" aria-label="Toggle theme">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"/>
+            <line x1="12" y1="1" x2="12" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1" y1="12" x2="3" y2="12"/>
+            <line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ======================================================================
+         Main Layout: Map Panel + Analytics Sidebar
+         ====================================================================== -->
+    <main class="app-content">
+      
+      <!-- 2.2 The Mapping Interface (Left/Center Panel) -->
+      <section class="map-panel">
+        <div id="map"></div>
+
+        <!-- Floating chips on Map -->
+        <div class="map-floating-overlay">
+          <div class="map-chip">
+            <span class="chip-dot"></span>
+            <span id="activeNodeChip">Node: Initializing...</span>
+          </div>
+          <div class="map-chip">
+            <span id="geoSourceChip">📍 Resolving Location...</span>
+          </div>
+        </div>
+
+        <!-- Heatmap Legend -->
+        <div class="map-legend">
+          <div class="legend-title">AoE Diffusion Scale (100m Radius)</div>
+          <div class="legend-scale">
+            <div class="legend-step"><span class="legend-color" style="background:#10b981;"></span> 9-10 Exc</div>
+            <div class="legend-step"><span class="legend-color" style="background:#22c55e;"></span> 7-8 Good</div>
+            <div class="legend-step"><span class="legend-color" style="background:#eab308;"></span> 5-6 Mod</div>
+            <div class="legend-step"><span class="legend-color" style="background:#f97316;"></span> 3-4 Unh</div>
+            <div class="legend-step"><span class="legend-color" style="background:#ef4444;"></span> 1-2 Haz</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2.3 The Analytics & Advisory Panel (Right Sidebar) -->
+      <aside class="sidebar-panel">
+
+        <!-- Dynamic Health Advisory Card -->
+        <div class="sidebar-card advisory-card" id="advisoryCard">
+          <div class="advisory-header">
+            <div class="advisory-icon" id="advisoryIcon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+            </div>
+            <div class="advisory-title" id="advisoryTitle">Health Advisory</div>
+          </div>
+          <p class="advisory-text" id="advisoryText">Analyzing air quality indices and meteorological telemetry...</p>
+        </div>
+
+        <!-- Live Metrics Grid -->
+        <div class="sidebar-card">
+          <div class="metrics-section-title">Live Sensor Telemetry</div>
+          <div class="metrics-grid">
+            
+            <!-- PM 2.5 -->
+            <div class="metric-card pm25">
+              <div class="metric-header">
+                <span class="metric-label">PM 2.5</span>
+                <span class="metric-unit">µg/m³</span>
+              </div>
+              <div class="metric-value" id="pm25Value">--</div>
+              <span class="metric-sub">Fine Inhalable Particles</span>
+            </div>
+
+            <!-- PM 10 -->
+            <div class="metric-card pm10">
+              <div class="metric-header">
+                <span class="metric-label">PM 10</span>
+                <span class="metric-unit">µg/m³</span>
+              </div>
+              <div class="metric-value" id="pm10Value">--</div>
+              <span class="metric-sub">Coarse Particulate Matter</span>
+            </div>
+
+            <!-- Temperature -->
+            <div class="metric-card temp">
+              <div class="metric-header">
+                <span class="metric-label">Temperature</span>
+                <span class="metric-unit">°C</span>
+              </div>
+              <div class="metric-value" id="tempValue">--</div>
+              <span class="metric-sub">Ambient Temperature</span>
+            </div>
+
+            <!-- Humidity -->
+            <div class="metric-card humidity">
+              <div class="metric-header">
+                <span class="metric-label">Humidity</span>
+                <span class="metric-unit">%</span>
+              </div>
+              <div class="metric-value" id="humidityValue">--</div>
+              <span class="metric-sub">Relative Humidity</span>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Live Climate & Comfort View (Section 3.3 Climate Modifier) -->
+        <div class="sidebar-card climate-box">
+          <div class="climate-header">
+            <span class="climate-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+              </svg>
+              Climate Comfort
+            </span>
+            <span class="climate-badge" id="comfortLabel">Evaluating</span>
+          </div>
+
+          <div class="comfort-meter-container">
+            <div class="comfort-bar-track">
+              <div class="comfort-bar-fill" id="comfortFill"></div>
+            </div>
+            <div class="comfort-labels">
+              <span>Cool</span>
+              <span>Ideal</span>
+              <span>Hot / Humid</span>
+            </div>
+          </div>
+
+          <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:var(--text-secondary);">
+            <span>Heat Index:</span>
+            <span id="heatIndexText" style="font-weight:700; color:var(--text-primary);">-- °C</span>
+          </div>
+
+          <div class="climate-modifier-notice" id="climatePenaltyBadge">
+            ⚠️ Climate Penalty Applied: High Heat & Humidity
+          </div>
+        </div>
+
+        <!-- Historical Trend Graph -->
+        <div class="sidebar-card chart-card">
+          <div class="chart-header">
+            <div>
+              <div class="chart-title">Historical Trends</div>
+              <div class="chart-subtitle">PM2.5 & Temperature vs Time</div>
+            </div>
+          </div>
+          <div class="chart-wrapper">
+            <canvas id="trendsChart"></canvas>
+          </div>
+        </div>
+
+      </aside>
+    </main>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  
+  <!-- Chart.js for Historical Trends -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <!-- Application Bootstrap -->
+  <script type="module" src="static/js/app.js"></script>
+</body>
+</html>

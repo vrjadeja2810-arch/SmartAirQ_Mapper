@@ -1,14 +1,24 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory, Response
 import sqlite3
+import csv
+import io
+import os
 from datetime import datetime
 
-app = Flask(__name__)
+# Initialize Flask with static folder configured
+app = Flask(__name__, static_folder='static', static_url_path='/static')
 
-# Initialize the local SQLite Database[cite: 5]
+DB_PATH = os.path.join(os.path.dirname(__file__), 'air_quality.db')
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# Initialize the local SQLite Database
 def init_db():
-    conn = sqlite3.connect('air_quality.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    # Create the table for storing sensor readings
     c.execute('''CREATE TABLE IF NOT EXISTS readings
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   node_id TEXT, lat REAL, lng REAL, 
@@ -17,43 +27,124 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 1. The endpoint the ESP32 sends data TO (HTTP POST)[cite: 5]
+# Enable CORS for all API requests
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+    return response
+
+# Serve Frontend SPA
+@app.route('/')
+def serve_index():
+    return send_from_directory(os.path.dirname(__file__), 'index.html')
+
+# 1. Endpoint for ESP32 / hardware nodes to send data (HTTP POST)
 @app.route('/api/readings', methods=['POST'])
 def receive_data():
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "No JSON payload received"}), 400
     
-    # Save the incoming data to the SQLite database
-    conn = sqlite3.connect('air_quality.db')
+    node_id = data.get('node_id', 'unknown_node')
+    lat = float(data.get('lat', 0.0) or 0.0)
+    lng = float(data.get('lng', 0.0) or 0.0)
+    pm25 = int(data.get('pm25', 0) or 0)
+    pm10 = int(data.get('pm10', 0) or 0)
+    aqi = int(data.get('aqi', 0) or 0)
+    temp = float(data.get('temp', 0.0) or 0.0)
+    humidity = float(data.get('humidity', 0.0) or 0.0)
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''INSERT INTO readings 
                  (node_id, lat, lng, pm25, pm10, aqi, temp, humidity, timestamp)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (data.get('node_id'), data.get('lat'), data.get('lng'), 
-               data.get('pm25'), data.get('pm10'), data.get('aqi'), 
-               data.get('temp'), data.get('humidity'), datetime.now()))
+              (node_id, lat, lng, pm25, pm10, aqi, temp, humidity, now))
     conn.commit()
+    inserted_id = c.lastrowid
     conn.close()
     
-    print(f"\n✅ Data caught from {data.get('node_id')}! Temp: {data.get('temp')}C, AQI: {data.get('aqi')}")
-    return jsonify({"status": "success"}), 201
+    print(f"\n[Telemetry] Caught from {node_id}! Temp: {temp}C, AQI: {aqi}, PM2.5: {pm25}")
+    return jsonify({
+        "status": "success",
+        "id": inserted_id,
+        "timestamp": now
+    }), 201
 
-# 2. The endpoint the Dashboard calls to fetch data FROM (HTTP GET)[cite: 5]
+# 2. Backward-compatible endpoint to fetch latest 50 readings (HTTP GET)
 @app.route('/api/readings', methods=['GET'])
 def send_data_to_dashboard():
-    conn = sqlite3.connect('air_quality.db')
-    conn.row_factory = sqlite3.Row # Formats the rows into dictionaries
+    conn = get_db_connection()
     c = conn.cursor()
-    # Fetch the 50 most recent readings
     c.execute('''SELECT * FROM readings ORDER BY id DESC LIMIT 50''')
     rows = c.fetchall()
     conn.close()
     return jsonify([dict(ix) for ix in rows])
 
-# Start the local server
+# 3. Dedicated endpoint for map and analytics (HTTP GET)
+@app.route('/api/map-data', methods=['GET'])
+def get_map_data():
+    limit = request.args.get('limit', default=100, type=int)
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Latest reading
+    c.execute('''SELECT * FROM readings ORDER BY id DESC LIMIT 1''')
+    latest_row = c.fetchone()
+    latest = dict(latest_row) if latest_row else None
+    
+    # Historical readings in chronological order (for Chart.js trends)
+    c.execute('''SELECT * FROM readings ORDER BY id DESC LIMIT ?''', (limit,))
+    history_rows = c.fetchall()
+    conn.close()
+    
+    history = [dict(ix) for ix in reversed(history_rows)]
+    
+    return jsonify({
+        "status": "success",
+        "server_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "latest": latest,
+        "history": history,
+        "count": len(history)
+    })
+
+# 4. Export database records to a downloadable CSV (HTTP GET)
+@app.route('/api/export-csv', methods=['GET'])
+def export_csv():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, node_id, lat, lng, pm25, pm10, aqi, temp, humidity, timestamp 
+                 FROM readings ORDER BY id ASC''')
+    rows = c.fetchall()
+    conn.close()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Write CSV Header
+    writer.writerow(['ID', 'Node ID', 'Latitude', 'Longitude', 'PM2.5 (ug/m3)', 
+                     'PM10 (ug/m3)', 'AQI', 'Temperature (C)', 'Humidity (%)', 'Timestamp'])
+    
+    for row in rows:
+        writer.writerow([row['id'], row['node_id'], row['lat'], row['lng'],
+                         row['pm25'], row['pm10'], row['aqi'], row['temp'], 
+                         row['humidity'], row['timestamp']])
+    
+    output.seek(0)
+    timestamp_slug = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"air_quality_readings_{timestamp_slug}.csv"
+    
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 if __name__ == '__main__':
     init_db()
     print("Starting Local Flask Server for Smart Air Quality Mapper...")
-    # host='0.0.0.0' allows the ESP32 on the hotspot to see this laptop
-    app.run(host='0.0.0.0', port=5000)
+    print("Accessible locally at http://127.0.0.1:5000 and network 0.0.0.0:5000")
+    app.run(host='0.0.0.0', port=5000, debug=False)
