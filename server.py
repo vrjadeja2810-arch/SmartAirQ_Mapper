@@ -7,7 +7,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # Load local environment variables from .env if present
-load_dotenv()
+ENV_PATH = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(ENV_PATH)
 
 # Initialize Flask with static folder configured
 app = Flask(__name__, static_folder='static', static_url_path='/static')
