@@ -44,6 +44,8 @@ class SmartAirQApp {
       geoSourceChip: document.getElementById("geoSourceChip"),
       activeNodeChip: document.getElementById("activeNodeChip"),
       sensorTimestampChip: document.getElementById("sensorTimestampChip"),
+      btnSetJamnagar: document.getElementById("btnSetJamnagar"),
+      btnClickPin: document.getElementById("btnClickPin"),
       themeToggle: document.getElementById("themeToggle"),
       btnExport: document.getElementById("btnExport")
     };
@@ -89,6 +91,35 @@ class SmartAirQApp {
     // CSV Export button direct link
     if (this.dom.btnExport) {
       this.dom.btnExport.href = `${this.apiBaseUrl}/api/export-csv`;
+    }
+
+    // Set to Jamnagar button
+    if (this.dom.btnSetJamnagar) {
+      this.dom.btnSetJamnagar.addEventListener("click", () => {
+        if (this.mapManager) {
+          this.mapManager.setJamnagarLocation();
+          if (this.dom.geoSourceChip) {
+            this.dom.geoSourceChip.textContent = "📍 Jamnagar, Gujarat";
+          }
+        }
+      });
+    }
+
+    // Click Map to Relocate button
+    if (this.dom.btnClickPin) {
+      this.dom.btnClickPin.addEventListener("click", () => {
+        if (this.mapManager) {
+          this.dom.btnClickPin.classList.add("active");
+          this.dom.btnClickPin.textContent = "👆 Click anywhere on map...";
+          this.mapManager.enableClickToLocate((loc) => {
+            this.dom.btnClickPin.classList.remove("active");
+            this.dom.btnClickPin.textContent = "📍 Click Map to Relocate";
+            if (this.dom.geoSourceChip) {
+              this.dom.geoSourceChip.textContent = `📍 Pinned (${loc.lat.toFixed(3)}, ${loc.lng.toFixed(3)})`;
+            }
+          });
+        }
+      });
     }
 
     // Window resize handler for map and chart
@@ -238,7 +269,7 @@ class SmartAirQApp {
       if (this.dom.geoSourceChip && geoResult) {
         this.dom.geoSourceChip.textContent = geoResult.isHardwareGps
           ? "🛰️ Hardware GPS"
-          : "📍 Browser Fallback";
+          : (geoResult.label || "📍 Jamnagar Fallback");
       }
     }
 

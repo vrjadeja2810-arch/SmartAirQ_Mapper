@@ -9,10 +9,68 @@ export class AirQualityMap {
     this.baseTileLayer = null;
     this.aoeCircle = null;
     this.centerMarker = null;
-    this.currentCoords = { lat: 20.5937, lng: 78.9629 }; // Default fallback (India central)
+    this.jamnagarCoords = { lat: 22.4707, lng: 70.0577, label: "Jamnagar, Gujarat" };
+    
+    // Load saved custom coordinates or default directly to Jamnagar
+    const saved = this.loadSavedLocation();
+    this.currentCoords = saved || this.jamnagarCoords;
+    this.customCoords = saved;
     this.isUsingHardwareGps = false;
-    this.browserCoords = null;
+    this.isClickToLocateActive = false;
+    this.latestReading = null;
+    this.latestColorHex = "#10b981";
     this.initMap();
+  }
+
+  loadSavedLocation() {
+    try {
+      const data = localStorage.getItem("smartairq-custom-location");
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (parsed && parsed.lat && parsed.lng) return parsed;
+      }
+    } catch (e) {
+      console.warn("Failed loading saved location:", e);
+    }
+    return null;
+  }
+
+  saveLocation(lat, lng, label = "Custom Pinned Location") {
+    this.customCoords = { lat, lng, label };
+    this.currentCoords = { lat, lng };
+    localStorage.setItem("smartairq-custom-location", JSON.stringify(this.customCoords));
+    if (this.latestReading) {
+      this.renderAoEZone(lat, lng, this.latestReading, this.latestColorHex, label);
+    }
+  }
+
+  setJamnagarLocation() {
+    this.saveLocation(this.jamnagarCoords.lat, this.jamnagarCoords.lng, "Jamnagar, Gujarat");
+    if (this.map) {
+      this.map.flyTo([this.jamnagarCoords.lat, this.jamnagarCoords.lng], 15, { duration: 1.0 });
+    }
+    return this.jamnagarCoords;
+  }
+
+  enableClickToLocate(onSelectedCallback) {
+    if (!this.map) return;
+    this.isClickToLocateActive = true;
+    const container = this.map.getContainer();
+    container.style.cursor = "crosshair";
+
+    const clickHandler = (e) => {
+      const { lat, lng } = e.latlng;
+      this.isClickToLocateActive = false;
+      container.style.cursor = "";
+      this.map.off("click", clickHandler);
+      this.saveLocation(lat, lng, "Custom Pinned Location");
+      if (this.map) {
+        this.map.panTo([lat, lng], { animate: true });
+      }
+      if (onSelectedCallback) onSelectedCallback({ lat, lng, label: "Custom Pinned Location" });
+    };
+
+    this.map.once("click", clickHandler);
   }
 
   initMap() {
@@ -21,7 +79,7 @@ export class AirQualityMap {
       return;
     }
 
-    // Initialize Leaflet map
+    // Initialize Leaflet map centered at Jamnagar
     this.map = L.map(this.containerId, {
       zoomControl: false,
       attributionControl: true
@@ -78,10 +136,12 @@ export class AirQualityMap {
   /**
    * Update map position based on telemetry and Geolocation Fallback Rule:
    * IF lat and lng != 0.0: Plot AoE at hardware coordinates
-   * IF lat and lng == 0.0: Trigger navigator.geolocation.getCurrentPosition()
+   * IF lat and lng == 0.0: Fallback to Jamnagar or user-pinned location
    */
   async updateTelemetryLocation(reading, colorHex = "#10b981") {
     if (!this.map) return;
+    this.latestReading = reading;
+    this.latestColorHex = colorHex;
 
     let targetLat = parseFloat(reading.lat || 0.0);
     let targetLng = parseFloat(reading.lng || 0.0);
@@ -89,49 +149,31 @@ export class AirQualityMap {
     // Check if hardware coordinates are valid
     if (targetLat !== 0.0 && targetLng !== 0.0 && !isNaN(targetLat) && !isNaN(targetLng)) {
       this.isUsingHardwareGps = true;
-      this.currentCoords = { lat: targetLat, lng: targetLng };
-      this.renderAoEZone(targetLat, targetLng, reading, colorHex, "Hardware GPS");
+      this.currentCoords = { lat: targetLat, lng: targetLng, label: "🛰️ Hardware GPS" };
+      this.renderAoEZone(targetLat, targetLng, reading, colorHex, "🛰️ Hardware GPS");
     } else {
-      // 3.1 Geolocation Fallback
+      // 3.1 Geolocation Fallback (defaults to Jamnagar, avoiding ISP routing city errors)
       this.isUsingHardwareGps = false;
-      const coords = await this.resolveBrowserLocation();
+      const coords = await this.resolveFallbackLocation();
       this.currentCoords = coords;
-      this.renderAoEZone(coords.lat, coords.lng, reading, colorHex, "Browser Geolocation Fallback");
+      const sourceLabel = coords.label || "Jamnagar (Device Location)";
+      this.renderAoEZone(coords.lat, coords.lng, reading, colorHex, sourceLabel);
     }
 
     return {
       coords: this.currentCoords,
-      isHardwareGps: this.isUsingHardwareGps
+      isHardwareGps: this.isUsingHardwareGps,
+      label: this.currentCoords.label
     };
   }
 
-  resolveBrowserLocation() {
-    return new Promise((resolve) => {
-      if (this.browserCoords) {
-        return resolve(this.browserCoords);
-      }
-
-      if ("geolocation" in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            this.browserCoords = {
-              lat: pos.coords.latitude,
-              lng: pos.coords.longitude
-            };
-            resolve(this.browserCoords);
-          },
-          (err) => {
-            console.warn("Geolocation fallback denied or failed:", err.message);
-            // Default center if browser denies permission
-            const fallback = { lat: 23.0225, lng: 72.5714 }; // Default Ahmedabad coordinate
-            resolve(fallback);
-          },
-          { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
-        );
-      } else {
-        resolve({ lat: 23.0225, lng: 72.5714 });
-      }
-    });
+  async resolveFallbackLocation() {
+    // Prioritize user's saved / pinned custom location
+    if (this.customCoords && this.customCoords.lat && this.customCoords.lng) {
+      return this.customCoords;
+    }
+    // Default directly to Jamnagar
+    return this.jamnagarCoords;
   }
 
   /**
