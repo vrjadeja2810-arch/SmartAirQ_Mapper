@@ -1,5 +1,5 @@
 /**
- * Leaflet Map Manager with AoE Heatmap Zone and Geolocation Fallback
+ * Leaflet Map Manager with AoE Heatmap Zone and Live Device GPS Tracking
  */
 
 export class AirQualityMap {
@@ -9,68 +9,20 @@ export class AirQualityMap {
     this.baseTileLayer = null;
     this.aoeCircle = null;
     this.centerMarker = null;
-    this.jamnagarCoords = { lat: 22.4707, lng: 70.0577, label: "Jamnagar, Gujarat" };
-    
-    // Load saved custom coordinates or default directly to Jamnagar
-    const saved = this.loadSavedLocation();
-    this.currentCoords = saved || this.jamnagarCoords;
-    this.customCoords = saved;
+    this.deviceLiveCoords = null;
+    this.currentCoords = { lat: 20.5937, lng: 78.9629 }; // Temporary initial center
     this.isUsingHardwareGps = false;
-    this.isClickToLocateActive = false;
     this.latestReading = null;
     this.latestColorHex = "#10b981";
-    this.initMap();
-  }
+    this.hasInitialCentered = false;
 
-  loadSavedLocation() {
+    // Clear any previous static location override
     try {
-      const data = localStorage.getItem("smartairq-custom-location");
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (parsed && parsed.lat && parsed.lng) return parsed;
-      }
-    } catch (e) {
-      console.warn("Failed loading saved location:", e);
-    }
-    return null;
-  }
+      localStorage.removeItem("smartairq-custom-location");
+    } catch (e) {}
 
-  saveLocation(lat, lng, label = "Custom Pinned Location") {
-    this.customCoords = { lat, lng, label };
-    this.currentCoords = { lat, lng };
-    localStorage.setItem("smartairq-custom-location", JSON.stringify(this.customCoords));
-    if (this.latestReading) {
-      this.renderAoEZone(lat, lng, this.latestReading, this.latestColorHex, label);
-    }
-  }
-
-  setJamnagarLocation() {
-    this.saveLocation(this.jamnagarCoords.lat, this.jamnagarCoords.lng, "Jamnagar, Gujarat");
-    if (this.map) {
-      this.map.flyTo([this.jamnagarCoords.lat, this.jamnagarCoords.lng], 15, { duration: 1.0 });
-    }
-    return this.jamnagarCoords;
-  }
-
-  enableClickToLocate(onSelectedCallback) {
-    if (!this.map) return;
-    this.isClickToLocateActive = true;
-    const container = this.map.getContainer();
-    container.style.cursor = "crosshair";
-
-    const clickHandler = (e) => {
-      const { lat, lng } = e.latlng;
-      this.isClickToLocateActive = false;
-      container.style.cursor = "";
-      this.map.off("click", clickHandler);
-      this.saveLocation(lat, lng, "Custom Pinned Location");
-      if (this.map) {
-        this.map.panTo([lat, lng], { animate: true });
-      }
-      if (onSelectedCallback) onSelectedCallback({ lat, lng, label: "Custom Pinned Location" });
-    };
-
-    this.map.once("click", clickHandler);
+    this.initMap();
+    this.startLiveDeviceTracking();
   }
 
   initMap() {
@@ -79,17 +31,90 @@ export class AirQualityMap {
       return;
     }
 
-    // Initialize Leaflet map centered at Jamnagar
+    // Initialize Leaflet map
     this.map = L.map(this.containerId, {
       zoomControl: false,
       attributionControl: true
-    }).setView([this.currentCoords.lat, this.currentCoords.lng], 15);
+    }).setView([this.currentCoords.lat, this.currentCoords.lng], 14);
 
     // Zoom control at bottom right
     L.control.zoom({ position: "bottomright" }).addTo(this.map);
 
     // Initial default Carto tile layer
     this.setCartoConfig({ cartoMapStyle: "voyager" });
+  }
+
+  /**
+   * Continuous high-accuracy device live GPS tracking
+   */
+  startLiveDeviceTracking() {
+    if ("geolocation" in navigator) {
+      // 1. Immediate fresh request
+      navigator.geolocation.getCurrentPosition(
+        (pos) => this.handleDeviceLocationSuccess(pos),
+        (err) => console.warn("Live device geolocation error:", err.message),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+      );
+
+      // 2. Watch position continuously as user/device moves
+      navigator.geolocation.watchPosition(
+        (pos) => this.handleDeviceLocationSuccess(pos),
+        (err) => {},
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+      );
+    } else {
+      console.warn("Geolocation API is not supported by this browser.");
+    }
+  }
+
+  /**
+   * Force fresh location poll on demand (e.g., when clicking "Refresh Location" button)
+   */
+  requestFreshDeviceLocation() {
+    return new Promise((resolve) => {
+      if (!("geolocation" in navigator)) {
+        return resolve(this.currentCoords);
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          this.handleDeviceLocationSuccess(pos);
+          resolve(this.deviceLiveCoords);
+        },
+        (err) => {
+          console.warn("Manual location refresh failed:", err.message);
+          resolve(this.deviceLiveCoords || this.currentCoords);
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
+      );
+    });
+  }
+
+  handleDeviceLocationSuccess(pos) {
+    const accuracy = Math.round(pos.coords.accuracy || 0);
+    this.deviceLiveCoords = {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracy: accuracy,
+      label: `📍 Device Live GPS (±${accuracy}m)`
+    };
+
+    // If hardware sensor GPS is 0,0, actively track device position
+    if (!this.isUsingHardwareGps) {
+      this.currentCoords = this.deviceLiveCoords;
+      if (this.latestReading) {
+        this.renderAoEZone(
+          this.deviceLiveCoords.lat,
+          this.deviceLiveCoords.lng,
+          this.latestReading,
+          this.latestColorHex,
+          this.deviceLiveCoords.label
+        );
+      } else if (!this.hasInitialCentered && this.map) {
+        this.map.setView([this.deviceLiveCoords.lat, this.deviceLiveCoords.lng], 15);
+        this.hasInitialCentered = true;
+      }
+    }
   }
 
   /**
@@ -136,7 +161,7 @@ export class AirQualityMap {
   /**
    * Update map position based on telemetry and Geolocation Fallback Rule:
    * IF lat and lng != 0.0: Plot AoE at hardware coordinates
-   * IF lat and lng == 0.0: Fallback to Jamnagar or user-pinned location
+   * IF lat and lng == 0.0: Plot AoE dynamically at laptop/device's live GPS coordinates
    */
   async updateTelemetryLocation(reading, colorHex = "#10b981") {
     if (!this.map) return;
@@ -152,11 +177,11 @@ export class AirQualityMap {
       this.currentCoords = { lat: targetLat, lng: targetLng, label: "🛰️ Hardware GPS" };
       this.renderAoEZone(targetLat, targetLng, reading, colorHex, "🛰️ Hardware GPS");
     } else {
-      // 3.1 Geolocation Fallback (defaults to Jamnagar, avoiding ISP routing city errors)
+      // 3.1 Geolocation Fallback: dynamically resolve device's live coordinates
       this.isUsingHardwareGps = false;
-      const coords = await this.resolveFallbackLocation();
+      const coords = this.deviceLiveCoords || (await this.requestFreshDeviceLocation());
       this.currentCoords = coords;
-      const sourceLabel = coords.label || "Jamnagar (Device Location)";
+      const sourceLabel = coords.label || "📍 Device Live GPS";
       this.renderAoEZone(coords.lat, coords.lng, reading, colorHex, sourceLabel);
     }
 
@@ -165,15 +190,6 @@ export class AirQualityMap {
       isHardwareGps: this.isUsingHardwareGps,
       label: this.currentCoords.label
     };
-  }
-
-  async resolveFallbackLocation() {
-    // Prioritize user's saved / pinned custom location
-    if (this.customCoords && this.customCoords.lat && this.customCoords.lng) {
-      return this.customCoords;
-    }
-    // Default directly to Jamnagar
-    return this.jamnagarCoords;
   }
 
   /**
@@ -195,7 +211,7 @@ export class AirQualityMap {
       <div class="popup-telemetry">
         <div class="popup-node-title">📡 ${nodeId}</div>
         <div class="popup-row"><span>Source:</span> <span>${sourceLabel}</span></div>
-        <div class="popup-row"><span>Coordinates:</span> <span>${lat.toFixed(4)}, ${lng.toFixed(4)}</span></div>
+        <div class="popup-row"><span>Coordinates:</span> <span>${lat.toFixed(5)}, ${lng.toFixed(5)}</span></div>
         <div class="popup-row"><span>AQI Index:</span> <span style="color:${colorHex}; font-weight:700;">${aqi}</span></div>
         <div class="popup-row"><span>PM2.5:</span> <span>${pm25} µg/m³</span></div>
         <div class="popup-row"><span>PM10:</span> <span>${pm10} µg/m³</span></div>
@@ -235,7 +251,7 @@ export class AirQualityMap {
         background-color: ${colorHex};
         border: 2px solid #ffffff;
         border-radius: 50%;
-        box-shadow: 0 0 10px ${colorHex};
+        box-shadow: 0 0 12px ${colorHex};
       "></div>`,
       iconSize: [14, 14],
       iconAnchor: [7, 7]
@@ -248,8 +264,13 @@ export class AirQualityMap {
       this.centerMarker = L.marker([lat, lng], { icon: centerIcon }).addTo(this.map);
     }
 
-    // Smoothly pan map to new coordinates
-    this.map.panTo([lat, lng], { animate: true, duration: 0.8 });
+    // Pan map to new live coordinates
+    if (!this.hasInitialCentered) {
+      this.map.setView([lat, lng], 15);
+      this.hasInitialCentered = true;
+    } else {
+      this.map.panTo([lat, lng], { animate: true, duration: 0.8 });
+    }
   }
 
   invalidateSize() {

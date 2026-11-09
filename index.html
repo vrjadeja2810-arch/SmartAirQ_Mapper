@@ -106,13 +106,10 @@
             <span>🕒 Last Sensor Packet: <strong id="sensorTimestampChip" style="color: var(--accent-primary);">Awaiting telemetry...</strong></span>
           </div>
 
-          <!-- Location Controls (Jamnagar preset and Click-to-Relocate) -->
+          <!-- Live GPS Controls -->
           <div style="display: flex; gap: 8px; pointer-events: auto; margin-top: 4px;">
-            <button id="btnSetJamnagar" class="btn-map-action" title="Lock sensor location to Jamnagar">
-              🎯 Center Jamnagar
-            </button>
-            <button id="btnClickPin" class="btn-map-action" title="Click anywhere on the map to place the sensor at your exact location">
-              📍 Click Map to Relocate
+            <button id="btnRefreshGPS" class="btn-map-action" title="Fetch fresh live GPS coordinates from your laptop/device">
+              📡 Refresh Live Device GPS
             </button>
           </div>
         </div>

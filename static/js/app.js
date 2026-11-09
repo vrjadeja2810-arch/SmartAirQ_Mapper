@@ -44,8 +44,7 @@ class SmartAirQApp {
       geoSourceChip: document.getElementById("geoSourceChip"),
       activeNodeChip: document.getElementById("activeNodeChip"),
       sensorTimestampChip: document.getElementById("sensorTimestampChip"),
-      btnSetJamnagar: document.getElementById("btnSetJamnagar"),
-      btnClickPin: document.getElementById("btnClickPin"),
+      btnRefreshGPS: document.getElementById("btnRefreshGPS"),
       themeToggle: document.getElementById("themeToggle"),
       btnExport: document.getElementById("btnExport")
     };
@@ -93,31 +92,18 @@ class SmartAirQApp {
       this.dom.btnExport.href = `${this.apiBaseUrl}/api/export-csv`;
     }
 
-    // Set to Jamnagar button
-    if (this.dom.btnSetJamnagar) {
-      this.dom.btnSetJamnagar.addEventListener("click", () => {
+    // Refresh Live Device GPS button
+    if (this.dom.btnRefreshGPS) {
+      this.dom.btnRefreshGPS.addEventListener("click", async () => {
         if (this.mapManager) {
-          this.mapManager.setJamnagarLocation();
-          if (this.dom.geoSourceChip) {
-            this.dom.geoSourceChip.textContent = "📍 Jamnagar, Gujarat";
+          this.dom.btnRefreshGPS.classList.add("active");
+          this.dom.btnRefreshGPS.textContent = "📡 Fetching Live GPS...";
+          const coords = await this.mapManager.requestFreshDeviceLocation();
+          this.dom.btnRefreshGPS.classList.remove("active");
+          this.dom.btnRefreshGPS.textContent = "📡 Refresh Live Device GPS";
+          if (this.dom.geoSourceChip && coords) {
+            this.dom.geoSourceChip.textContent = coords.label || `📍 Live (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`;
           }
-        }
-      });
-    }
-
-    // Click Map to Relocate button
-    if (this.dom.btnClickPin) {
-      this.dom.btnClickPin.addEventListener("click", () => {
-        if (this.mapManager) {
-          this.dom.btnClickPin.classList.add("active");
-          this.dom.btnClickPin.textContent = "👆 Click anywhere on map...";
-          this.mapManager.enableClickToLocate((loc) => {
-            this.dom.btnClickPin.classList.remove("active");
-            this.dom.btnClickPin.textContent = "📍 Click Map to Relocate";
-            if (this.dom.geoSourceChip) {
-              this.dom.geoSourceChip.textContent = `📍 Pinned (${loc.lat.toFixed(3)}, ${loc.lng.toFixed(3)})`;
-            }
-          });
         }
       });
     }
