@@ -111,6 +111,7 @@ def get_map_data():
     return jsonify({
         "status": "success",
         "server_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "last_received": latest['timestamp'] if latest else None,
         "latest": latest,
         "history": history,
         "count": len(history)

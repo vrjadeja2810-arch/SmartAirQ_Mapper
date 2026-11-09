@@ -35,16 +35,17 @@ export class AirQualityMap {
   }
 
   /**
-   * Configure Carto Basemap with optional private API key and style preset
+   * Configure Carto Basemap with Carto API key (?key=...) and style preset
    */
   setCartoConfig(config = {}) {
     if (!this.map) return;
     const key = config.cartoApiKey ? config.cartoApiKey.trim() : "";
     const style = config.cartoMapStyle || "voyager";
 
-    let tileUrl = `https://{s}.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}{r}.png`;
+    // Carto raster tile format: https://{s}.basemaps.cartocdn.com/rastertiles/{style}/{z}/{x}/{y}.png?key=...
+    let tileUrl = `https://{s}.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png`;
     if (key) {
-      tileUrl += `?api_key=${encodeURIComponent(key)}`;
+      tileUrl += `?key=${encodeURIComponent(key)}`;
     }
 
     const options = {
@@ -57,6 +58,21 @@ export class AirQualityMap {
       this.map.removeLayer(this.baseTileLayer);
     }
     this.baseTileLayer = L.tileLayer(tileUrl, options).addTo(this.map);
+
+    // Reliable fallback: if Carto encounters any tile error, fallback to OpenStreetMap so map is never blank
+    let fallbackDone = false;
+    this.baseTileLayer.on("tileerror", () => {
+      if (!fallbackDone) {
+        fallbackDone = true;
+        console.warn("Carto tile error detected, falling back to OpenStreetMap tiles.");
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(this.map);
+      }
+    });
+
+    if (this.aoeCircle) this.aoeCircle.bringToFront();
   }
 
   /**

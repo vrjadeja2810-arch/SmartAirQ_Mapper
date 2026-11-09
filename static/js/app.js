@@ -43,6 +43,7 @@ class SmartAirQApp {
       climatePenaltyBadge: document.getElementById("climatePenaltyBadge"),
       geoSourceChip: document.getElementById("geoSourceChip"),
       activeNodeChip: document.getElementById("activeNodeChip"),
+      sensorTimestampChip: document.getElementById("sensorTimestampChip"),
       themeToggle: document.getElementById("themeToggle"),
       btnExport: document.getElementById("btnExport")
     };
@@ -102,21 +103,27 @@ class SmartAirQApp {
   }
 
   startClockTicker() {
-    // Ticker to update "Last packet: X seconds ago"
+    // Ticker to update "Last packet: X seconds ago" with exact sensor reading time
     setInterval(() => {
-      if (!this.lastPacketTime) {
+      if (!this.lastSensorTimestamp) {
         if (this.dom.lastPacketText) this.dom.lastPacketText.textContent = "Awaiting data...";
         return;
       }
-      const elapsedSeconds = Math.floor((Date.now() - this.lastPacketTime) / 1000);
+      const elapsedSeconds = this.lastPacketTime
+        ? Math.floor((Date.now() - this.lastPacketTime) / 1000)
+        : 0;
+
       if (this.dom.lastPacketText) {
+        const timePart = this.lastSensorTimestamp.includes(" ")
+          ? this.lastSensorTimestamp.split(" ")[1]
+          : this.lastSensorTimestamp;
         if (elapsedSeconds < 4) {
-          this.dom.lastPacketText.textContent = "Just now";
+          this.dom.lastPacketText.textContent = `${timePart} (Just now)`;
         } else if (elapsedSeconds < 60) {
-          this.dom.lastPacketText.textContent = `${elapsedSeconds}s ago`;
+          this.dom.lastPacketText.textContent = `${timePart} (${elapsedSeconds}s ago)`;
         } else {
           const minutes = Math.floor(elapsedSeconds / 60);
-          this.dom.lastPacketText.textContent = `${minutes}m ago`;
+          this.dom.lastPacketText.textContent = `${timePart} (${minutes}m ago)`;
         }
       }
     }, 1000);
@@ -162,6 +169,12 @@ class SmartAirQApp {
     const pm25 = latest.pm25 || 0;
     const pm10 = latest.pm10 || 0;
     const nodeId = latest.node_id || "ESP32_Node";
+    const sensorTimestamp = latest.timestamp || "Live";
+
+    this.lastSensorTimestamp = sensorTimestamp;
+    if (this.dom.sensorTimestampChip) {
+      this.dom.sensorTimestampChip.textContent = sensorTimestamp;
+    }
 
     // 1. Calculate Score & Climate Modifier
     const scoring = calculateEnvironmentalScore(aqi, temp, humidity);
