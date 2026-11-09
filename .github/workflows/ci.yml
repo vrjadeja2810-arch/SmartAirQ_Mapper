@@ -1,0 +1,771 @@
+name: CI
+
+# The required merge gate on every PR into main and every push to main, and
+# the ONLY CI this repository has (#1627): no local battery mirrors it.
+# scripts/protect-main.sh makes the six job names below the required checks
+# (keep their `name:` values in sync with it: GitHub keys a required check on
+# that exact string), and scripts/ci-merge.sh waits for them to go green
+# before it merges.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Every job runs on ubuntu-24.04, not ubuntu-latest: GitHub moved
+# ubuntu-latest to 26.04, where `playwright install --with-deps` refuses
+# ("Playwright does not support chromium on ubuntu26.04-x64"), which fails
+# every job that installs a browser. Move to latest once Playwright supports it.
+
+# A newer push to the same branch cancels the older in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conventions:
+    name: Conventions (webjs check)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # Dogfood the framework's own correctness checks on the in-repo apps.
+      - name: webjs check (blog, gallery, website)
+        run: |
+          for app in examples/blog gallery website; do
+            echo "::group::webjs check $app"
+            ( cd "$app" && node "$GITHUB_WORKSPACE/packages/cli/bin/webjs.js" check )
+            echo "::endgroup::"
+          done
+      # Project health on the same two apps (#1257). WHICH findings are fatal
+      # is each app's own call, declared in its package.json `webjs.doctor.gate`
+      # rather than here, so a local `webjs doctor` and this step agree. Today
+      # website + examples/blog gate UNMARKED_ASSET_LINKS to error. Two checks
+      # red with no gate entry at all, NODE_VERSION and TSCONFIG_ERASABLE,
+      # since either would 500 an app at runtime; everything else stays a warn
+      # and cannot red this job. Deliberately NOT --strict:
+      # the git-hook, env-drift, vendor-pin, and framework-resolve checks are
+      # environment-shaped and would fail a perfectly healthy runner.
+      - name: webjs doctor (blog, gallery, website)
+        run: |
+          for app in examples/blog gallery website; do
+            echo "::group::webjs doctor $app"
+            ( cd "$app" && node "$GITHUB_WORKSPACE/packages/cli/bin/webjs.js" doctor )
+            echo "::endgroup::"
+          done
+      - name: Framework runtime packages are buildless (no .ts source)
+        run: |
+          # Invariant: packages/{core,server,cli} and packages/editors/* are
+          # plain .js + JSDoc. .ts is allowed in examples/docs/website and in
+          # scaffold templates / the ui registry (those ship to user apps).
+          hits=$(git ls-files 'packages/core/**/*.ts' 'packages/server/**/*.ts' 'packages/cli/**/*.ts' 'packages/editors/**/*.ts' \
+            | grep -vE '\.d\.ts$|/templates/' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::TypeScript source in a buildless framework package (invariant violated):"; echo "$hits"; exit 1
+          fi
+      - name: No em-dash in source (invariant 11)
+        run: |
+          # U+2014 is banned repo-wide for webjs-AUTHORED prose. changelog/ is
+          # generated from commit history (pre-rule entries) so it is excluded,
+          # and .claude/skills/ holds vendored agent skills (e.g. the
+          # Anthropic-authored use-railway), which are external content not
+          # subject to our prose style, the same as node_modules.
+          hits=$(git grep -lP "\x{2014}" -- '*.js' '*.ts' '*.md' ':!changelog/' ':!**/node_modules/**' ':!.claude/skills/**' ':!.agents/skills/**' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::em-dash (U+2014) found; replace per AGENTS.md invariant 11:"; echo "$hits"; exit 1
+          fi
+
+  unit:
+    name: Unit + integration (node --test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # Some integration tests boot the blog example in-process (e.g. the
+      # differential elision test renders its mixed `/` page), which calls
+      # listPosts() and needs a migrated SQLite DB, the same setup the e2e job
+      # does.
+      - name: Prepare the blog example database
+        working-directory: examples/blog
+        run: |
+          cp .env.example .env
+          npm run db:migrate
+          npm run db:seed
+      - run: npm test
+
+  bun:
+    name: Bun runtime smoke + test matrix (#508, #509, #511)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      # npm ci installs the workspace + the `amaro` optionalDependency that the
+      # Bun stripper backend needs.
+      - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # FIRST, because it is what makes every step below able to fail (#1092).
+      # Each of those runs a proof script that boots a real app, and startServer
+      # installs an uncaughtException handler whose graceful shutdown used to
+      # exit 0 unconditionally, so a failed top-level assertion was swallowed and
+      # the step went green on a real regression. This asserts the three arms
+      # that prove the exit code discriminates: a failed assertion is non-zero, a
+      # passing script is 0, and SIGTERM against a live server is still 0.
+      - name: Proof-script exit codes on Bun
+        run: bun test/bun/proof-exit-code.mjs
+      # Boot a webjs app under Bun: SSR + TypeScript strip (via amaro, since Bun
+      # has no built-in stripper) + a server-action RPC round-trip.
+      - name: webjs runtime smoke on Bun
+        run: bun test/bun/smoke.mjs
+      # Boot the full LISTENER on the Bun.serve shell (#511): SSR + a route.ts GET
+      # + the SSE live-reload stream + a WebSocket WS-export echo over a real
+      # socket. The same assertions run on the node:http shell under `npm test`,
+      # so this is the cross-shell parity proof.
+      - name: webjs listener parity on Bun
+        run: bun test/bun/listener.mjs
+      # The form-action leak guard (#1154) on Bun: a divergence here is a
+      # divergence in whether a server action's SOURCE reaches the served HTML,
+      # so it cannot be left to the Node suite alone. Covers both SSR state
+      # machines, which are independent and must be kept in step by hand.
+      - name: WebJs form-action guard parity on Bun
+        run: bun test/bun/form-action-guard.mjs
+      # live() in an attribute hole (#1443): the SSR unwrap must produce
+      # byte-identical attribute emission on Bun, across both server machines.
+      # The bug class this guards was a server/client disagreement (a falsy
+      # `?bool=${live(v)}` emitting its attribute anyway), so a per-runtime
+      # flavor of the same divergence is the failure worth pinning.
+      - name: WebJs live()-attribute-hole parity on Bun
+        run: bun test/bun/live-attribute-hole.mjs
+      # Form-action dispatch (#1155) on Bun: the 'use server' load hook that
+      # registers action identity is installed by a different mechanism on each
+      # runtime (module.registerHooks vs Bun.plugin), and the submission path
+      # runs through FormData / multipart parsing and Web Crypto. A divergence
+      # means a no-JS form silently posts nowhere.
+      - name: WebJs form-action dispatch parity on Bun
+        run: bun test/bun/form-action-dispatch.mjs
+      # Listener overhead reductions on Bun (#756): the out-of-band IP stamp (no
+      # Request clone), the buffered sync-compression fast path, the streamed-head
+      # non-blocking classifier, and the basePath rebuild spoof guard. Run as the
+      # plain `.mjs` script (not via `bun test`) so it is not subject to bun test's
+      # per-test timeout while it boots two servers + does a deliberate 400ms stall.
+      - name: webjs listener overhead on Bun
+        run: bun test/bun/listener-overhead.mjs
+      # Production render memos (#1644): two prod renders are byte-identical
+      # apart from the CSP nonce, the importmap JSON is memoized per build,
+      # the public env shim is a per-build snapshot, and a lazy component is
+      # registered with the lazy loader rather than imported.
+      - name: WebJs production render memos on Bun
+        run: bun test/bun/prod-perf-memos.mjs
+      # Settled RSS after a load burst (#1644): a prod server on the Bun.serve
+      # shell releases memory after 20,000 compressed requests. Plain script:
+      # the burst plus a settle poll of up to a minute.
+      - name: WebJs prod load settled RSS on Bun
+        run: bun test/bun/prod-load-rss.mjs
+      # FileStore streaming on Bun (#509): put/get round-trip + the
+      # no-orphan-on-mid-stream-error invariant (the Readable.fromWeb->reader-loop
+      # fix, which Readable.fromWeb hangs on under Bun).
+      - name: webjs FileStore streaming on Bun
+        run: bun test/bun/file-storage.mjs
+      # Compression on the Bun.serve shell (#517): brotli served via node:zlib
+      # (the web CompressionStream had no brotli), plus the no-hang-on-mid-stream-
+      # error guard (the body is fed through a reader-loop + pipeline, not
+      # Readable.fromWeb, which hangs on Bun).
+      - name: webjs compression on Bun
+        run: bun test/bun/compression.mjs
+      # SSR HTML-context handling on Bun (#1128): a tag name inside a comment,
+      # raw text, RCDATA, or an attribute value is text, not an element. The
+      # scanner is offset arithmetic over indexOf / startsWith results and a
+      # per-call RegExp, so a V8-versus-JSC divergence would not throw, it would
+      # shift a range boundary and make a component render on one runtime and
+      # silently vanish on the other. Asserts both directions.
+      - name: SSR comment and raw-text handling on Bun
+        run: bun test/bun/comment-not-an-element.mjs
+      # The one-pass SSR renderer on Bun (#1646): the per-template tokenizer,
+      # the op walker and the in-walk component expansion are string slicing
+      # and regex work on the hot path, where a V8-versus-JSC difference shows
+      # up as a byte difference rather than a throw. Renders the whole golden
+      # corpus and holds it to the committed fixtures.
+      - name: One-pass SSR renderer byte parity on Bun
+        run: bun test/bun/ssr-one-pass-parity.mjs
+      # A custom element's attributes are served as the element left them
+      # after the server pass (lit-ssr's renderAttributes shape): the opening
+      # tag is re-read and spliced by position, string work a runtime
+      # difference would show as bytes.
+      - name: Served host attributes on Bun
+        run: bun test/bun/ssr-served-attrs.mjs
+      # asset() url resolution on Bun (#1194): the helper reads the file
+      # synchronously, hashes it with node:crypto, and compares node:path
+      # containment to decide whether a url may be fingerprinted at all. A
+      # divergence would either hand the two runtimes different urls for one
+      # file (thrashing every client's immutable cache across a mixed fleet) or
+      # weaken the gate that keeps a private file from being hashed and
+      # published. Asserts the hash, the fragment split, verdict-independence,
+      # and the traversal refusals.
+      - name: asset() url resolution on Bun
+        run: bun test/bun/asset-url.mjs
+      # Dev hot reload on Bun (#514): start `webjs dev` under Bun, edit a
+      # re-imported route module, and assert the response updates with NO manual
+      # restart. The same script proves no Node regression under `npm test`.
+      - name: webjs dev hot reload on Bun
+        run: bun test/bun/dev-hot-reload.mjs
+      # Plugin-served modules (#1550): `bun --hot` never reloaded a module a
+      # Bun.plugin served (every 'use server' module, and every app module with
+      # source locations on), and Bun drops a file:// URL's ?t= cache-bust. The
+      # supervisor now restarts on Bun too, and the cache-bust rides a plain
+      # path; prove page, imported-module and server-module edits all land.
+      - name: webjs dev reload of plugin-served modules on Bun
+        run: bun test/bun/dev-reload-plugin-served.mjs
+      # Dev live-reload of a webjs.dev.watch dir OUTSIDE the appDir (#894) and
+      # the SSE retry hint on the Bun.serve shell (#893). Plain scripts (no
+      # per-test timeout) since each boots the real CLI + polls for readiness;
+      # the node:test integration versions are node:http-listener-specific and
+      # denylisted in run-bun-tests.js.
+      # dev-overlay-scope rides here for the same reason: each listener shell
+      # replays the retained dev error frame with its own code (node writes into
+      # a node:http res, Bun enqueues into a ReadableStream controller), so the
+      # frame's new url field has to be proven on both (#1047).
+      # dev-public-before-warm rides here too: the #1397 hoist serves /public/*
+      # ahead of ensureReady() in dev, and the two listener shells reach
+      # handle() differently (the Bun shell may rebuild the Request and
+      # classifies the body through readBufferedOrStream), so the ordering has
+      # to be proven on both.
+      # dev-morph-verdict rides here too: the live-reload frame's `data:` line is
+      # now a JSON verdict payload rather than a bare token (#1398), and the two
+      # listener shells drive `SseHub._raw` over different transports (node
+      # `res.write` versus a Bun ReadableStream controller), so the frame has to
+      # be proven byte-identical on both.
+      # dev-embed rides here too: the embed bridge (#1498) is injected into the
+      # SSR head and relaxes the framing headers in the shared response merge,
+      # so the injection and the header rewrite have to hold on both shells.
+      # dev-watch-error rides here too (#1521): the dev supervisor and the
+      # server's watcher must survive an unreadable watched file and bring a
+      # crashed server back, on both runtimes.
+      # port-in-use rides here too (#1527): Bun.serve's default SO_REUSEPORT let
+      # a second server bind a taken port silently, so the fail-fast path has
+      # to be proven on the Bun shell.
+      - name: webjs dev extra-watch + reload-retry + overlay-scope + public-before-warm + morph-verdict + embed + watch-error + port-in-use on Bun
+        run: |
+          bun test/bun/dev-extra-watch.mjs
+          bun test/bun/dev-watch-error.mjs
+          bun test/bun/dev-watch-replaced.mjs
+          bun test/bun/port-in-use.mjs
+          bun test/bun/dev-reload-retry.mjs
+          bun test/bun/dev-overlay-scope.mjs
+          bun test/bun/dev-public-before-warm.mjs
+          bun test/bun/dev-morph-verdict.mjs
+          bun test/bun/dev-embed.mjs
+      # Dev source locations (#1499): the SSR half is a module load hook, which
+      # is module.registerHooks on Node and a Bun.plugin onLoad on Bun, so the
+      # annotation (and the plugin leaving *.server.* to the seed plugin) has
+      # to be proven on both.
+      - name: webjs dev source locations on Bun
+        run: bun test/bun/dev-source-locations.mjs
+      # Bun's on-disk transpiler cache keys a large module by content and keeps
+      # the absolute paths the dev alias resolver returned, so the dev child
+      # runs with it off; otherwise another checkout of the file imports from
+      # the first one.
+      - name: webjs dev transpiler cache on Bun
+        run: bun test/bun/dev-transpiler-cache.mjs
+      # The app-source deploy signal (#899) is derived from an fs source walk +
+      # a node:crypto digest, so it must be byte-identical on the Bun.serve path.
+      - name: App-source deploy signal on Bun
+        run: bun test/bun/app-source-signal.mjs
+      # Boot the website (which serves /docs and /ui) on Bun and GET real
+      # routes (#542). Every in-repo app deploys on Bun, but only examples/blog
+      # had a Bun boot in CI, so a per-route break only on Bun (the #526
+      # component-page 500) could reach production. The script runs the app's
+      # webjs.start.before presteps (the ui registry copy is the #526 root
+      # cause) and probes a gallery component detail page. Node runs it too in
+      # the "In-repo app tests" job.
+      - name: App boot-check on Bun (website incl. /docs + /ui)
+        run: bun test/bun/app-boot.mjs
+      # SSR action-result seeding on Bun (#529): seeding rode Node's
+      # module.registerHooks, which Bun lacks; it now installs via a Bun.plugin
+      # onLoad, so a shipping async component seeds during SSR (the __webjs-seeds
+      # block) and does NOT re-fetch on hydration. The same script proves the Node
+      # install under `npm test`.
+      - name: webjs action seeding on Bun
+        run: bun test/bun/seed.mjs
+      # Blog Drizzle DB round-trip on Bun (#551/#563): the connection picks
+      # bun:sqlite + drizzle-orm/bun-sqlite on Bun (vs node:sqlite on Node),
+      # so prove the blog's real schema round-trips an insert().returning(), a
+      # timestamp_ms Date column, and a relational read on the Bun driver. The
+      # same script proves the Node path under `npm test`.
+      - name: webjs blog DB round-trip on Bun
+        run: bun test/bun/blog-db.mjs
+      # # path-alias resolution on Bun (#555): the alias is Node's native
+      # package.json "imports" field; Bun must resolve the same
+      # `#*` catch-all key (a `#/`-prefixed key does NOT resolve on Bun, which is
+      # why the scaffold ships the slash-free `#*` form). The same script proves the Node path
+      # under `npm test`.
+      - name: "webjs # path alias on Bun"
+        run: bun test/bun/path-alias.mjs
+      # Server timeout wiring on Bun (#663): the node:http requestTimeout /
+      # headersTimeout / keepAliveTimeout map onto Bun.serve's single idleTimeout
+      # (#511); this asserts startBunListener feeds the mapped value into
+      # Bun.serve. The pure mapping is also unit-tested under the matrix below.
+      - name: webjs server timeouts on Bun
+        run: bun test/bun/timeouts.mjs
+      # Template binding-prefix dispatch on Bun (#784): the renderers now read
+      # the prefix set from core's single-sourced BINDING_PREFIXES and dispatch
+      # on kind; this asserts @event drops and .prop / ?bool round-trip the same
+      # on the Bun SSR path (buffered and streamed) as on Node.
+      - name: webjs binding-prefix dispatch on Bun
+        run: bun test/bun/binding-prefixes.mjs
+      # Reverse-proxy forwarded headers on Bun (#1090): the node shell corrects
+      # the request url via urlFromRequest before building its Request, but the
+      # Bun shell handed Bun.serve's request straight through, so behind a
+      # TLS-terminating proxy every absolute URL an app derived came out http://
+      # (webjs.dev served an http:// og:image). This asserts a page's ctx.url AND
+      # a route handler's raw req.url both carry the forwarded scheme + host.
+      - name: Forwarded proto/host on Bun
+        run: bun test/bun/forwarded-proto.mjs
+      # Search and share metadata on Bun (#1564): metadata routes get a context
+      # built from the request, and sitemap / robots / canonical tags are what a
+      # crawler reads, so assert them on the Bun.serve shell too.
+      - name: SEO metadata on Bun
+        run: bun test/bun/seo-metadata.mjs
+      # Reverse-proxy TRUST posture on Bun (#1097, #1104). The companion to the
+      # step above: that one proves the url CORRECTION, this one proves what the
+      # correction is then allowed to reach. The url is corrected in a different
+      # place on each shell and the HTML cache key is computed downstream of it,
+      # so the X-Forwarded-Host cache poisoning could be closed on one runtime
+      # and open on the other.
+      - name: Forwarded trust posture on Bun
+        run: bun test/bun/forwarded-trust.mjs
+      # OAuth redirectTo round trip on Bun (#1495): several Set-Cookie headers
+      # on one response, a Web Crypto HMAC-signed target cookie, and a form
+      # body read, all of which a runtime can implement differently.
+      - name: OAuth redirectTo round trip on Bun
+        run: bun test/bun/oauth-redirect-to.mjs
+      # __Host- auth cookies in production on Bun (#1538): getSetCookie, JWT
+      # signing and a NODE_ENV read at call time.
+      - name: __Host- auth cookies on Bun
+        run: bun test/bun/auth-host-prefix.mjs
+      # Root middleware resolution on Bun (#1098). A root `middleware.ts` was
+      # never loaded at all: the lookup was the single literal `middleware.js`,
+      # with no error to notice. The proof is a module-LOAD path (a bare
+      # import() of a .ts file), and the TS strip differs per runtime, so it
+      # needs its own step rather than riding the Node suite.
+      - name: Root middleware resolution on Bun
+        run: bun test/bun/root-middleware.mjs
+      # Boot-time config validation on Bun (#1300). It runs inside
+      # createRequestHandler, the boot path both the node:http shell and the
+      # Bun.serve shell go through, and it reads the packaged JSON Schema off
+      # disk relative to import.meta.url. This asserts a typo'd key warns exactly
+      # once and the app still boots and serves, so a runtime difference cannot
+      # turn a warning into a dead app.
+      - name: Config validation warns and boots on Bun
+        run: bun test/bun/webjs-config-validate.mjs
+      # Light-DOM slot SSR projection on Bun (#1021): slot substitution
+      # (injectDSD / substituteSlotsInRender) is on the SSR hot path, so the
+      # projection must be byte-consistent across runtimes: authored children
+      # land in their named + default slots, an unmatched slot falls back, and
+      # the data-webjs-light + data-projection markers are emitted. The same
+      # script proves the Node path under `npm test`.
+      - name: Light-DOM slot SSR projection on Bun
+        run: bun test/bun/slot-ssr-parity.mjs
+      # SQLite busy_timeout on Bun (#673): bun:sqlite (like node:sqlite) defaults
+      # busy_timeout to 0, so a contended write throws `database is locked`; the
+      # connection tune sets busy_timeout=5000 + WAL. This asserts the bug
+      # condition and the fix on the Bun driver. The same script proves the Node
+      # path under `npm test`.
+      - name: webjs SQLite busy_timeout on Bun
+        run: bun test/bun/sqlite-busy-timeout.mjs
+      # Vendor specifier scan on Bun (#1399): the importmap is now derived by
+      # walking the module graph from the browser-bound entries, so an app
+      # scaffolded with `--runtime bun` runs the whole analysis under Bun. A set
+      # that drifted between runtimes would serve a Bun author a different
+      # importmap from the same source. Also asserts the runtime set stays a
+      # subset of the pin set, the relation pinned/unpinned parity rests on.
+      - name: Vendor specifier scan on Bun
+        run: bun test/bun/vendor-scan.mjs
+      # The Bun test MATRIX (#509): run the runtime-sensitive node:test suite
+      # (core + server + cross-package test/) under Bun, file by file, classifying
+      # each result. Documented Node-only files + Bun-test-runner-quirk files are
+      # skipped with a reason; genuine Bun failures fail the job. This is what
+      # catches the long tail of cross-runtime incompatibilities.
+      - name: webjs Bun test matrix
+        run: node scripts/run-bun-tests.js
+
+  db-postgres:
+    name: Postgres prod-engine round-trip (#563)
+    runs-on: ubuntu-24.04
+    # The cross-database Drizzle abstraction (#563) makes the schema, queries,
+    # and actions portable, but migrations + runtime behavior are per-dialect.
+    # The rest of CI runs on SQLite, so this job proves the SAME unified schema
+    # round-trips on a REAL Postgres engine (a service container), the
+    # dev-SQLite / prod-Postgres workflow the abstraction promises.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: webjs_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # The `pg` driver is installed only in THIS job (not a root devDependency),
+      # so it stays out of the shared package-lock. --no-save keeps the lock
+      # untouched; this job does not run the type fixtures, so the extra install
+      # cannot affect them.
+      - run: npm install --no-save pg@^8.13.0
+      - name: Postgres round-trip (unified schema on the prod engine)
+        env:
+          WEBJS_PG_URL: postgres://postgres:postgres@localhost:5432/webjs_test
+        run: node --test test/pg/pg-roundtrip.test.mjs
+
+  browser:
+    name: Browser (web-test-runner / Playwright)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright browsers (Chromium, Firefox, WebKit)
+        run: npx playwright install --with-deps chromium firefox webkit
+      - run: npm run test:browser
+
+  e2e:
+    name: E2E (Puppeteer against the blog example)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium for Puppeteer
+        run: npx playwright install --with-deps chromium
+      - name: Resolve the Chromium binary path
+        run: echo "CHROMIUM_PATH=$(node -e "console.log(require('playwright-core').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: Prepare the blog example database
+        working-directory: examples/blog
+        run: |
+          cp .env.example .env
+          npm run db:migrate
+          npm run db:seed
+      - name: Run e2e
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/e2e.test.mjs
+      # Browser-test harness (#806): spawns real wtr with the shipped scaffold
+      # config against a fixture app whose browser test imports a real .ts
+      # component that imports a 'use server' action, and asserts it loads in
+      # Chromium. Verifies webjs test --browser end to end.
+      - name: Run browser-harness e2e (#806)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/browser-harness.test.mjs
+      # A streamed Suspense template that arrives in two pieces must resolve
+      # whole: the boot observer used to clone it before the parser finished.
+      - name: Run Suspense split-template e2e
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/suspense-partial-template.test.mjs
+      # Dev error overlay URL scope (#1047): spawns `webjs dev` against a fixture
+      # app and drives a real browser, because both halves of the bug are only
+      # observable there. Hovering a link to a throwing page fires a real
+      # prefetch GET (no navigation at all), and the overlay's survival across a
+      # client-router swap is a DOM fact, not a server one.
+      - name: Run dev-overlay-nav e2e (#1047)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/dev-overlay-nav.test.mjs
+      # Dev source locations (#1499): a real `webjs dev` with
+      # WEBJS_SOURCE_LOCATIONS=1 and a real browser, because the headline claim
+      # (client-rendered elements carry data-webjs-src, hydration stays clean)
+      # is a browser fact.
+      - name: Run dev-source-locations e2e (#1499)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/dev-source-locations.test.mjs
+      # Dev embed bridge (#1498): a host page on one origin frames a real
+      # `webjs dev` on another, because the frame loading at all, cross-origin
+      # postMessage, and a host navigate being a client-router soft navigation
+      # are browser facts.
+      - name: Run dev-embed e2e (#1498)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/dev-embed.test.mjs
+      # Quiet dev live-reload stream (#1507): live reload while visible, no
+      # stream while hidden, and a catch-up reload on return are browser facts.
+      - name: Run dev-idle-stream e2e (#1507)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/dev-idle-stream.test.mjs
+      # A pinned vendor package with transitive deps (#1518): whether the
+      # browser can resolve and run the whole chain is a browser fact.
+      - name: Run vendor-pin-transitives e2e (#1518)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/vendor-pin-transitives.test.mjs
+      # Dev observability for SSR action seeding (#1309): spawns `webjs dev`
+      # against a fixture app and drives a real browser, because the headline
+      # criterion is a browser fact. Whether a hydrating component re-issued the
+      # RPC is a network observation, and the console line fires on an idle
+      # callback after a real hydration pass; neither is reachable from a unit
+      # test.
+      - name: Run dev-seed-observability e2e (#1309)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/dev-seed-observability.test.mjs
+      # The in-place dev refresh (#1398): spawns `webjs dev` against a fixture app
+      # and drives a real browser, because every criterion is a browser fact. A
+      # page or layout edit updating WITHOUT a reload is not observable from the
+      # DOM (the fixture stamps a per-document token to tell the two apart), and
+      # a hydrated component surviving the swap needs a real element upgrade.
+      # This is also the only layer that exercises the whole loop end to end:
+      # the watcher classifies, the SSE frame carries the verdict, the relay
+      # coalesces it, and the tab applies it.
+      - name: Run dev-morph e2e (#1398)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/dev-morph.test.mjs
+      # A cookie-setting form action refreshes the layout (#1557). Only a real
+      # server can show it: the action's redirect is followed by fetch, the
+      # follow-up GET must re-render the layouts, and the swap must morph the
+      # header outside every children range without a reload.
+      - name: Run form-action layout refresh e2e (#1557)
+        env:
+          WEBJS_E2E: '1'
+        run: node --test test/e2e/form-action-layout-refresh.test.mjs
+      # Form-submission, concurrent-nav and scroll-restoration e2e (#1310). This
+      # one runs against the WEBSITE rather than the blog, because the scroll
+      # case needs a page whose content settles taller after the swap, which is
+      # what a /ui/<name> gallery page does and a blog page does not. It was
+      # outside CI entirely until now, so the one assertion covering a Back
+      # restore on a real growing page never ran on a PR.
+      #
+      # `webjs dev` runs the website's own `webjs.dev.before` tasks (the registry
+      # copy and the Tailwind build), so no extra setup step is needed here.
+      #
+      # The same server also runs the chrome-swap e2e (#1666): the marketing
+      # site and /ui have different chrome owned by two route-group layouts,
+      # and a soft navigation between them must swap it with no full load.
+      - name: Run form-submission + scroll-restoration + chrome-swap e2e (#1310, #1666)
+        env:
+          WEBJS_E2E: '1'
+        run: |
+          # Redirected to a FILE, not left on the step's stdout. A background
+          # child that keeps the log pipe open outlives the script and stalls
+          # the step: run locally, the identical script hung for ten minutes
+          # after the tests had already passed, with the server still listening.
+          setsid npm run dev --workspace=@webjsdev/website > /tmp/website-dev.log 2>&1 &
+          server_pid=$!
+          # Stop the server however this step ends. `trap ... EXIT` keeps the
+          # test's exit code, which a trailing `kill` would not: the step runs
+          # under `bash -e`, so a failing test aborts the script before any
+          # cleanup line placed after it could run. The pid is captured into a
+          # variable rather than read as `$!` inside the trap, which would
+          # resolve at FIRE time against whatever job was most recent then.
+          # `setsid` puts the server in its own process GROUP and the trap
+          # signals the whole group. `webjs dev` spawns a watcher which spawns
+          # the listener, so killing only the npm pid leaves the port held; that
+          # was measured, the step exited cleanly and :5001 stayed up.
+          # On any failure the server log goes BACK to the step log. This is a
+          # required check and the server runs the website's own before-tasks
+          # (registry copy, Tailwind build), so a boot failure, a build failure
+          # or a 500 on /ui/button must not fail the check with its cause in a
+          # file nobody reads. `$?` is captured first, since the trap body would
+          # otherwise clobber it.
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "--- website dev server log ---"; tail -n 200 /tmp/website-dev.log || true; fi; kill -- -"$server_pid" 2>/dev/null || true; exit "$rc"' EXIT
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:5001/ui/button && break
+            sleep 2
+          done
+          curl -sf -o /dev/null http://localhost:5001/ui/button \
+            || { echo "website dev server never came up"; exit 1; }
+          node --test test/e2e/form-submission-and-race.test.mjs test/e2e/ui-chrome-swap.test.mjs
+      # Touch-emulation e2e for interactive Tier-2 ui components (#745/#747):
+      # boots the site serving the gallery and taps hover-card / dropdown-submenu / sonner
+      # under a Chromium iPhone context (faithful touch events, no real device).
+      - name: Run ui touch e2e
+        run: npm run test:e2e:touch --workspace=@webjsdev/ui
+      # Accessibility-tree e2e for the ui dialog / alert-dialog / sonner ARIA
+      # (#1080/#1245): reads Chrome's computed accessibility tree over CDP, which
+      # is what a screen reader consumes, rather than re-checking the attributes
+      # the components wrote. Headless, so no display server is needed.
+      - name: Run ui a11y-tree e2e
+        run: npm run test:e2e:a11y-tree --workspace=@webjsdev/ui
+
+  # Cross-runtime e2e (#523), split into its OWN job (#774) so it runs in
+  # PARALLEL with the Node-served e2e above instead of as a trailing step
+  # (which serialized the two and ~doubled the e2e critical path). Re-runs the
+  # SAME suite under node --test (its node:test hook lifecycle does not survive
+  # `bun test`) but with the blog SERVED on Bun (WEBJS_E2E_RUNTIME=bun spawns
+  # the blog under the bun binary), proving the Bun.serve shell + Drizzle-on-Bun
+  # in a real browser. The few node-only assertions (SSR seeding, #472/#488) and
+  # the #528-blocked abort test skip themselves on Bun.
+  #
+  # NOTE: the required-status-check gate on `main` is the Node job above
+  # ("E2E (Puppeteer against the blog example)"); this Bun job is an additional
+  # parallel signal. To also gate merges on it, add its name to
+  # branches/main/protection required_status_checks (admin op, see
+  # scripts/protect-main.sh).
+  e2e-bun:
+    name: E2E (blog served on Bun)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium for Puppeteer
+        run: npx playwright install --with-deps chromium
+      - name: Resolve the Chromium binary path
+        run: echo "CHROMIUM_PATH=$(node -e "console.log(require('playwright-core').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Prepare the blog example database
+        working-directory: examples/blog
+        run: |
+          cp .env.example .env
+          npm run db:migrate
+          npm run db:seed
+      - name: Run e2e with the blog served on Bun
+        env:
+          WEBJS_E2E: '1'
+          WEBJS_E2E_RUNTIME: 'bun'
+        run: node --test test/e2e/e2e.test.mjs
+
+  dist:
+    name: Build (@webjsdev/core dist)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # The published @webjsdev/core ships pre-built dist/ bundles (built
+      # by the prepare hook at publish). Build them in CI so a bundling
+      # break is caught on the PR, not at release time.
+      - run: npm run build:dist --workspace=@webjsdev/core
+
+  apps:
+    name: In-repo app tests (website + blog + gallery)
+    runs-on: ubuntu-24.04
+    # The framework jobs above cover packages/* and the root cross-package
+    # suite. This job runs each IN-REPO app's OWN test suite (its `webjs test`
+    # script), which the root runners do not discover, so a regression in an
+    # app's tests gates the merge (issue #342). The website's `test` runs both
+    # its node + browser suites (hence Playwright), and covers the docs too
+    # since they are its own /docs routes. The blog is node-only and touches
+    # its SQLite DB (the same setup the unit + e2e jobs do). The website's
+    # suite also covers the component gallery, which is its own /ui routes
+    # since #1099. The `node test/bun/app-boot.mjs` boot-check step below
+    # (#627) additionally boots it via createRequestHandler and asserts it
+    # serves real routes with no broken modulepreload; the same script runs on
+    # Bun in the `bun` job (#542).
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright Chromium (for the website + gallery browser tests)
+        run: npx playwright install --with-deps chromium
+      - name: Prepare the blog example database
+        working-directory: examples/blog
+        run: |
+          cp .env.example .env
+          npm run db:migrate
+          npm run db:seed
+      # The gallery's auth card queries a real users table, and its test skips
+      # itself (rather than failing) when the table is missing, so an unmigrated
+      # database would turn the whole card green vacuously.
+      - name: Prepare the gallery database
+        working-directory: gallery
+        run: |
+          cp .env.example .env
+          npm run db:migrate
+      # Nothing in the pipeline typechecked the website before, so a type
+      # break landed on main and every branch cut from it inherited a red
+      # tsc (#1260). It runs before the tests so a type break names itself
+      # rather than surfacing as a test failure. Both apps are gated, and both
+      # tsconfig includes now cover test/ as well as app / components / lib /
+      # modules (#1299), so a type error in a test file fails here instead of
+      # waiting for a reviewer to read the line. The website's .js files under
+      # test/ enter its include parsed-but-unchecked, since that app sets
+      # checkJs: false; see website/AGENTS.md.
+      - name: website typecheck
+        run: npm run typecheck --workspace=@webjsdev/website
+      - name: blog typecheck
+        run: npm run typecheck --workspace=@webjsdev/example-blog
+      - name: gallery typecheck
+        run: npm run typecheck --workspace=@webjsdev/gallery
+      - name: website tests (node + browser)
+        run: npm test --workspace=@webjsdev/website
+      - name: blog tests (node)
+        run: npm test --workspace=@webjsdev/example-blog
+      # The gallery is the canonical source of everything `webjs create` ships,
+      # so its suite is the one that catches a demo breaking against a framework
+      # change. Before #1370 those files sat un-executed under templates/, which
+      # is exactly the rot this job now closes. `webjs test` runs node + browser.
+      - name: gallery tests (node + browser)
+        run: npm test --workspace=@webjsdev/gallery
+      # Boot the website on Node and assert it serves real routes with no
+      # broken modulepreload, covering its /docs (#1098) and /ui (#1099)
+      # routes. Runs the app's `webjs.start.before` presteps first (the ui
+      # registry copy, the #526 root cause). The blog is covered by the e2e
+      # job. docs.webjs.dev and ui.webjs.dev are Cloudflare redirect rules with
+      # no origin, so there is nothing here to boot for them.
+      - name: App boot-check on Node (website incl. /docs + /ui)
+        run: node test/bun/app-boot.mjs
+
+  docker:
+    name: Docker image build (the deploy artifact)
+    runs-on: ubuntu-24.04
+    # The jobs above run the apps in-process via createRequestHandler; NONE of
+    # them build the Docker image that every Railway service actually deploys.
+    # That gap let #404's package reorg ship a stale `COPY packages/ts-plugin`
+    # path that broke all four live deploys for a day (#409): a COPY of a
+    # missing source is a hard Docker error, invisible to every in-process
+    # check. Building the image here catches that class (stale COPY paths, a
+    # broken npm install / dist / tailwind / db-migrate step in the image) on the
+    # PR instead of at deploy time. Build only, no push.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the monorepo image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

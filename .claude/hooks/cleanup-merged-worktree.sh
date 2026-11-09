@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+#
+# Claude Code PostToolUse hook (matcher: Bash).
+#
+# After a `gh pr merge`, sweep the repo's git worktrees and REMOVE the ones
+# whose work has already landed, so a merged branch's worktree does not leak.
+# Accumulated stale worktrees (a session that merged but never cleaned up, or
+# crashed mid-task) are exactly what this closes: the webjs-start-work skill
+# already says "after the PR merges, git worktree remove", but as guidance it
+# gets skipped, so this makes the cleanup deterministic.
+#
+# CONSERVATIVE BY DESIGN. A worktree is removed ONLY when ALL hold:
+#   * it is a LINKED worktree, not the primary checkout;
+#   * it is NOT the current directory (you cannot remove the one you are in);
+#   * its branch is not main/master;
+#   * its branch is MERGED (an ancestor of the base ref, OR a merged GitHub PR
+#     for that head branch, which is how squash-merges are detected);
+#   * its working tree is CLEAN apart from untracked node_modules / .webjs.
+# Anything with uncommitted or unpushed-looking work is KEPT and reported, so
+# the hook can never destroy in-flight work.
+#
+# Before removing one, it repoints any `<primary>/node_modules/@webjsdev/*` link
+# that targets that worktree back at the primary's own packages (#1442), so a
+# removal cannot leave the primary resolving into a directory that is gone.
+#
+# It never blocks the tool (always exits 0) and reports what it did back to the
+# model via hookSpecificOutput.additionalContext. Disable with
+# WEBJS_NO_WORKTREE_CLEANUP=1, which disables the repoint along with everything
+# else, since it is the same teardown.
+#
+# Rule: AGENTS.md "One task per git worktree" + the webjs-start-work skill.
+
+set -uo pipefail
+
+# Read the whole payload first so we always honour the hook contract.
+payload=$(cat 2>/dev/null || true)
+
+if [ "${WEBJS_NO_WORKTREE_CLEANUP:-}" = "1" ]; then exit 0; fi
+
+cmd=$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
+if [ -z "$cmd" ]; then exit 0; fi
+
+# Only act after a `gh pr merge` (whole word, not `gh pr merge-queue` typos etc.).
+# scripts/ci-merge.sh counts too: it waits for GitHub CI and then `gh pr merge`
+# inside the script, where this hook cannot see the literal string (#1593).
+if ! printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]-])(gh pr merge|ci-merge\.sh)([^[:alnum:]-]|$)'; then
+  exit 0
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then exit 0; fi
+
+# The base ref merged branches land on. Prefer origin/main; fall back to a
+# local main/master (the test harness has no remote).
+base=""
+for ref in origin/main origin/master main master; do
+  if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then base="$ref"; break; fi
+done
+[ -z "$base" ] && exit 0
+
+here=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")
+# The primary worktree is the first entry of `git worktree list`.
+primary=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+
+is_merged() {
+  local br="$1"
+  # Ancestor of the base ref (fast-forward / rebase merges, and the real
+  # merges the test harness makes).
+  if git merge-base --is-ancestor "refs/heads/$br" "$base" 2>/dev/null; then return 0; fi
+  # A merged GitHub PR for this head branch (squash merges, which are NOT an
+  # ancestor of base). Network; skipped when gh is absent or unauthenticated.
+  #
+  # REST, not `gh pr list`. Every `gh pr *` porcelain command goes through the
+  # GraphQL API, whose budget is scored in POINTS and which agent sessions here
+  # routinely exhaust; when it is spent this lookup returns nothing, the branch
+  # reads as unmerged, and the worktree leaks, which is the exact failure this
+  # hook exists to prevent. The REST pulls endpoint is a separate budget.
+  # `{owner}`/`{repo}` expand from the current repo, and resolve to nothing when
+  # there is no remote (the test harness), so the call fails closed to the
+  # ancestor check above rather than erroring.
+  #
+  # Read the number through `grep -E '^[0-9]+$'` rather than trusting the whole
+  # capture: a `gh` earlier on PATH may be a wrapper that prints a banner to
+  # STDOUT before exec'ing the real binary, which would otherwise land inside
+  # this variable.
+  if command -v gh >/dev/null 2>&1; then
+    local n
+    n=$(gh api "repos/{owner}/{repo}/pulls?state=closed&head={owner}:$br&per_page=100" \
+      --jq '[.[] | select(.merged_at != null)] | .[0].number // empty' 2>/dev/null \
+      | grep -E '^[0-9]+$' || true)
+    [ -n "$n" ] && return 0
+  fi
+  return 1
+}
+
+# Clean = nothing in `git status` except untracked node_modules / .webjs caches.
+is_clean() {
+  local wt="$1" dirty
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null \
+    | grep -vE '(^|/)(node_modules|\.webjs)(/|$)' || true)
+  [ -z "$dirty" ]
+}
+
+# #1442: the primary may hold `@webjsdev/*` links pointing INTO a worktree we
+# are about to delete. Repoint them back at the primary's own packages while the
+# target still exists, so the removal cannot leave a dangling link behind. It is
+# scoped to links targeting THIS worktree; the general sweep belongs to
+# `npm run worktree:link`, which you run deliberately.
+repoint_primary_links() {
+  # NOT `base`: that name holds the script-global merge-base ref that
+  # `is_merged()` reads, and bash `local` is dynamically scoped, so shadowing
+  # it here would blank the ref for anything this function ever calls.
+  local wt="$1" scope wtreal entry_name abs rel
+  scope="$primary/node_modules/@webjsdev"
+  [ -d "$scope" ] || return 0
+  wtreal=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+
+  # Dot entries too: npm's `.name-HASH` staging links land in the same scope.
+  for e in "$scope"/* "$scope"/.[!.]*; do
+    # An unmatched glob arrives literally, and is not a symlink, so this also
+    # absorbs an empty scope.
+    [ -L "$e" ] || continue
+    entry_name=$(basename "$e")
+    # Resolve without `readlink -f`, which is GNU-only.
+    abs=$(cd "$(dirname "$e")" 2>/dev/null && cd "$(readlink "$e")" 2>/dev/null && pwd -P) || continue
+    case "$abs" in
+      "$wtreal"/*) ;;
+      *) continue ;;
+    esac
+    rel="${abs#"$wtreal"/}"
+    case "$entry_name" in
+      .*-????????)
+        rm -f "$e" && relinked+=("dropped staging entry @webjsdev/$entry_name")
+        ;;
+      *)
+        if [ -e "$primary/$rel" ]; then
+          ln -sfn "../../$rel" "$e" && relinked+=("repointed @webjsdev/$entry_name -> ../../$rel")
+        else
+          relinked+=("KEPT @webjsdev/$entry_name (points into $wt, but $rel is missing in the primary)")
+        fi
+        ;;
+    esac
+  done
+}
+
+removed=()
+kept=()
+relinked=()
+
+# Parse worktree path + branch pairs.
+wt=""
+while IFS= read -r line; do
+  case "$line" in
+    worktree\ *) wt="${line#worktree }" ;;
+    branch\ *)
+      br="${line#branch refs/heads/}"
+      # Skip the primary checkout and main/master lines.
+      if [ "$wt" = "$primary" ] || [ "$br" = "main" ] || [ "$br" = "master" ]; then wt=""; continue; fi
+      # Never remove the worktree we are currently in.
+      if [ "$wt" = "$here" ]; then
+        kept+=("$wt (current directory; cd out then \`git worktree remove\`)")
+        wt=""; continue
+      fi
+      if ! is_clean "$wt"; then
+        kept+=("$wt (uncommitted changes)"); wt=""; continue
+      fi
+      if ! is_merged "$br"; then
+        kept+=("$wt (branch $br not merged yet)"); wt=""; continue
+      fi
+      repoint_primary_links "$wt"
+      if git worktree remove --force "$wt" >/dev/null 2>&1; then
+        removed+=("$wt ($br)")
+      else
+        kept+=("$wt (git worktree remove failed)")
+      fi
+      wt="" ;;
+    "") wt="" ;;
+  esac
+done < <(git worktree list --porcelain 2>/dev/null)
+
+git worktree prune >/dev/null 2>&1 || true
+
+# Report nothing if there was nothing to do.
+if [ "${#removed[@]}" -eq 0 ] && [ "${#kept[@]}" -eq 0 ] && [ "${#relinked[@]}" -eq 0 ]; then exit 0; fi
+
+msg="Worktree cleanup after \`gh pr merge\`:"
+for r in "${removed[@]:-}"; do [ -n "$r" ] && msg="$msg"$'\n'"  removed $r (merged, clean)"; done
+for k in "${kept[@]:-}"; do [ -n "$k" ] && msg="$msg"$'\n'"  kept $k"; done
+for l in "${relinked[@]:-}"; do [ -n "$l" ] && msg="$msg"$'\n'"  $l"; done
+
+jq -n --arg ctx "$msg" '{
+  hookSpecificOutput: {
+    hookEventName: "PostToolUse",
+    additionalContext: $ctx
+  }
+}' 2>/dev/null || true
+
+exit 0

@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Agent"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/route-skills.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/nudge-uncommitted.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
