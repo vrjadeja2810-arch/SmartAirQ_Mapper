@@ -14,11 +14,15 @@ ENV/
 .env.*
 *.env
 !.env.example
-config.local.json
-config.js
+credentials.json
+wifi_credentials.*
+wifi_config.*
 secrets.*
 *.key
 *.pem
+*.cert
+config.local.json
+config.js
 
 # SQLite Databases (uncomment if you want the database excluded from git)
 # air_quality.db

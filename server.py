@@ -161,6 +161,14 @@ def get_client_config():
 
 if __name__ == '__main__':
     init_db()
+    host = os.environ.get('SERVER_HOST', '0.0.0.0')
+    port = int(os.environ.get('SERVER_PORT', 5000))
+    server_ip = os.environ.get('SERVER_IP', '10.49.96.26')
+
+    print("=" * 65)
     print("Starting Local Flask Server for Smart Air Quality Mapper...")
-    print("Accessible locally at http://127.0.0.1:5000 and network 0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    print(f"  • Local Dashboard:         http://127.0.0.1:{port}")
+    print(f"  • Network / Hotspot URL:   http://{server_ip}:{port}")
+    print(f"  • ESP32 POST Endpoint:     http://{server_ip}:{port}/api/readings")
+    print("=" * 65)
+    app.run(host=host, port=port, debug=False)

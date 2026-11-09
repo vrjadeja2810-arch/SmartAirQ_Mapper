@@ -9,9 +9,12 @@ import { TrendsChart } from "./chart.js";
 
 class SmartAirQApp {
   constructor() {
+    // Dynamically resolves to current origin, or falls back to server IP 10.49.96.26:5000
     this.apiBaseUrl = window.location.origin.includes("5000")
       ? window.location.origin
-      : "http://127.0.0.1:5000"; // Supports local server or external proxy
+      : (window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1"
+          ? `http://${window.location.hostname}:5000`
+          : "http://10.49.96.26:5000");
 
     this.mapManager = null;
     this.chartManager = null;
